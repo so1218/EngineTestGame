@@ -1,0 +1,14 @@
+{
+  "RootSignature": "Sprite",
+  "VertexShader": "UI/Sprite.VS.hlsl",
+  "PixelShader": "UI/Sprite.PS.hlsl",
+  "InputLayout": "None",
+  "BlendState": "AlphaBlendUI",
+  "RasterizerState": "NoCullSolid",
+  "DepthStencilState": "Off",
+  "Topology": "Triangle",
+  "RTVFormats": [
+    "R16G16B16A16_FLOAT"
+  ],
+  "DSVFormat": "D24_UNORM_S8_UINT"
+}

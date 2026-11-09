@@ -1,0 +1,82 @@
+#include "pch.h"
+#include "VolumetricFogBilateralPass.h"
+#include "Engine.h"
+#include "GraphicsDevice.h"
+#include "PSOManager.h"
+#include "PIXColors.h"
+
+namespace FS
+{
+
+void VolumetricFogBilateralPass::Initialize(Engine* engine, uint32_t width, uint32_t height, PSOManager* psoManager)
+{
+    InitializeBase(engine, width, height, DXGI_FORMAT_R16G16B16A16_FLOAT, true);
+    psoManager_ = psoManager;
+
+    ID3D12Device* device = engine->GetGraphicsDevice()->GetDevice();
+    constantBuffer_ = BufferManager::CreateMappedConstantBuffer(
+        device,
+        &cbData_
+    );
+
+    // 保存した値が無いときの初期値
+    cbData_->blurRadius = 2;
+    cbData_->spatialSigma = 2.0f;
+    cbData_->depthSigma = 0.001f;
+
+    // ぼかす前の霧、深度、出力の 3 つ
+    D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+    heapDesc.NumDescriptors = 3;
+    heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+
+    device->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&passHeap_));
+    passHeap_->SetName(L"VolumetricFogBilateral_Heap");
+}
+
+void VolumetricFogBilateralPass::Execute(ID3D12GraphicsCommandList* cmdList, const PostEffectContext& context, D3D12_GPU_DESCRIPTOR_HANDLE overrideInput)
+{
+    PIXScopedEvent(cmdList, FS::PIXColors::Compute, "Volumetric Fog Bilateral Pass (%ux%u)",
+        static_cast<uint32_t>(viewport_.Width), static_cast<uint32_t>(viewport_.Height));
+
+    ID3D12Device* device = engine_->GetGraphicsDevice()->GetDevice();
+    uint32_t handleSize = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    D3D12_CPU_DESCRIPTOR_HANDLE destHandle = passHeap_->GetCPUDescriptorHandleForHeapStart();
+
+    D3D12_CPU_DESCRIPTOR_HANDLE rawFogHandle = engine_->GetSRVManager()->GetSRVHandleCPU_ForCopying(rawFogSrvIndex_);
+    device->CopyDescriptorsSimple(1, destHandle, rawFogHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    destHandle.ptr += handleSize;
+    device->CopyDescriptorsSimple(1, destHandle, context.srvManager->GetSRVHandleCPU_ForCopying(context.sceneDepthSrvIndex), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    destHandle.ptr += handleSize;
+    D3D12_CPU_DESCRIPTOR_HANDLE uavHandleCPU = engine_->GetSRVManager()->GetSRVHandleCPU_ForCopying(uavIndex_);
+    device->CopyDescriptorsSimple(1, destHandle, uavHandleCPU, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    PreCompute(cmdList);
+
+    cmdList->SetComputeRootSignature(context.rootSigManager->GetRootSignature("VolumetricFogBilateralCS"));
+    cmdList->SetPipelineState(psoManager_->GetPSO("VolumetricFogBilateralCS"));
+
+    ID3D12DescriptorHeap* heaps[] = { passHeap_.Get() };
+    cmdList->SetDescriptorHeaps(1, heaps);
+
+    D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle = passHeap_->GetGPUDescriptorHandleForHeapStart();
+
+    cmdList->SetComputeRootConstantBufferView(0, constantBuffer_->GetGPUVirtualAddress());
+    cmdList->SetComputeRootDescriptorTable(1, gpuHandle);
+    gpuHandle.ptr += handleSize;
+    cmdList->SetComputeRootDescriptorTable(2, gpuHandle);
+
+    gpuHandle.ptr += handleSize;
+    cmdList->SetComputeRootDescriptorTable(3, gpuHandle);
+
+    uint32_t dispatchX = (static_cast<uint32_t>(viewport_.Width) + 7) / 8;
+    uint32_t dispatchY = (static_cast<uint32_t>(viewport_.Height) + 7) / 8;
+    cmdList->Dispatch(dispatchX, dispatchY, 1);
+
+    PostCompute(cmdList);
+}
+
+}

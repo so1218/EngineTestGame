@@ -1,0 +1,4 @@
+{
+  "RootSignature": "VolumetricFogInjectionCS",
+  "ComputeShader": "Volumetric/VolumetricFogInjection.CS.hlsl"
+}

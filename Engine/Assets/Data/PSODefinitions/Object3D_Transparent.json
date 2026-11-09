@@ -1,0 +1,15 @@
+{
+  "RootSignature": "Instancing3D",
+  "VertexShader": "Objects/Object3D_Instanced.VS.hlsl",
+  "PixelShader": "Objects/Object3D.PS.hlsl",
+  "InputLayout": "Default3D",
+  "BlendState": "AlphaBlend",
+  "RasterizerState": "BackCullSolid",
+  "DepthStencilState": "ReadOnly",
+  "Topology": "Triangle",
+  "RTVFormats": [
+    "R16G16B16A16_FLOAT",
+    "R16G16B16A16_FLOAT"
+  ],
+  "DSVFormat": "D24_UNORM_S8_UINT"
+}

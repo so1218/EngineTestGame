@@ -1,0 +1,4 @@
+{
+  "RootSignature": "VoxelSpatialFilterCS",
+  "ComputeShader": "Volumetric/VoxelSpatialFilter.CS.hlsl"
+}

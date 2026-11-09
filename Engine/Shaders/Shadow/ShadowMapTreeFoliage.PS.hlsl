@@ -1,0 +1,21 @@
+#include "Common/ShaderConstants.hlsli"
+
+ConstantBuffer<LeafMaterialData> gMaterial : register(b2);
+
+Texture2D<float4> gAlbedoAlphaTex : register(t8);
+
+SamplerState gPointSampler : register(s3);
+
+struct ShadowVSOutput
+{
+    float4 position : SV_POSITION;
+    float2 texcoord : TEXCOORD0;
+};
+
+void main(ShadowVSOutput input)
+{
+    float alpha = gAlbedoAlphaTex.Sample(gPointSampler, input.texcoord).a;
+    
+    // アルファカットオフ以下のピクセルは影を落とさない
+    clip(alpha - gMaterial.alphaCutoff);
+}

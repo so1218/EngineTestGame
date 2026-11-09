@@ -1,0 +1,14 @@
+{
+  "RootSignature": "ShadowMapSkinning",
+  "VertexShader": "Shadow/ShadowMapSkinning.VS.hlsl",
+  "PixelShader": null,
+  "InputLayout": "Skinning",
+  "BlendState": "Opaque",
+  "RasterizerState": "FrontCullSolid",
+  "DepthStencilState": "Default",
+  "Topology": "Triangle",
+  "RTVFormats": [
+    "UNKNOWN"
+  ],
+  "DSVFormat": "D32_FLOAT"
+}

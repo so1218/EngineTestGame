@@ -1,0 +1,4 @@
+{
+  "RootSignature": "VoxelIntegrateCS",
+  "ComputeShader": "Volumetric/VoxelIntegrate.CS.hlsl"
+}

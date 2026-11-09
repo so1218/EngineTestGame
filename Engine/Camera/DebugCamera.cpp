@@ -1,0 +1,145 @@
+#include "pch.h"
+#include "DebugCamera.h"
+#include "Input.h"
+#include "ImGuiManager.h"
+#include "PropertyBinder.h"
+
+namespace FS
+{
+
+void DebugCamera::Initialize()
+{
+    // ワールド変換の初期化
+    worldTransform_.Initialize();
+
+    // カメラの初期設定
+    target_ = { 0.0f, 0.0f, 0.0f }; // 注視点
+    distance_ = 50.0f;             // 注視点からの距離
+    upVector_ = { 0.0f, 1.0f, 0.0f }; // MakeLookAt用の上方向ベクトル
+
+    // クォータニオンのための初期角度
+    currentPitch_ = 0.4f;
+    currentYaw_ = 0.0f;
+
+    dragSpeed_ = 0.02f;
+    rotateSpeed_ = 0.001f;
+    zoomSpeed_ = 0.03f;
+
+#ifdef ENABLE_DEBUG_CAMERA
+    isEnabled_ = true;
+#else
+    isEnabled_ = false;
+#endif
+}
+
+void DebugCamera::Update()
+{
+    if (!isEnabled_) return;
+
+    bool canInput = true;
+#if ENABLE_IMGUI && ENABLE_DEBUG_CAMERA
+    // マウスがScene Viewの上にない・Gizmoをドラッグ中なら操作しない
+    if (!ImGuiManager::IsSceneHovered() || ImGuizmo::IsUsing())
+    {
+        canInput = false;
+    }
+#endif
+
+    if (canInput)
+    {
+        // ズームはマウスホイールで操作
+        {
+            const float wheelDelta = Input::GetInstance().GetMouseWheel();
+            distance_ -= wheelDelta * zoomSpeed_;
+
+            Quaternion currentRotation = worldTransform_.rotation_;
+            Vector3 forward = currentRotation.RotateVector(Vector3(0.0f, 0.0f, 1.0f));
+            if (distance_ < minDistance_)
+            {
+                // targetをforward方向に押す
+                target_ += forward * (minDistance_ - distance_);
+                distance_ = minDistance_;
+            }
+        }
+
+        // マウス中ボタンドラッグ時の処理
+        if (Input::GetInstance().IsMouseButtonPressed(Input::MouseButton::Middle))
+        {
+            // マウスの移動量を取得
+            const Vector2 mouseDelta = Input::GetInstance().GetMouseDelta();
+            const float deltaX = mouseDelta.x;
+            const float deltaY = mouseDelta.y;
+
+            // Shiftキーの有無で分岐
+            if (Input::GetInstance().IsKeyPressed(DIK_LSHIFT))
+            {
+                // 平行移動
+                Quaternion currentRotation = worldTransform_.rotation_;
+                Vector3 right = currentRotation.RotateVector(Vector3(1.0f, 0.0f, 0.0f));
+                Vector3 up = currentRotation.RotateVector(Vector3(0.0f, 1.0f, 0.0f));
+
+                target_ -= right * static_cast<float>(deltaX) * dragSpeed_;
+                target_ += up * static_cast<float>(deltaY) * dragSpeed_;
+            }
+            else
+            {
+                // 回転
+                currentYaw_ += deltaX * rotateSpeed_;
+                currentPitch_ += deltaY * rotateSpeed_;
+            }
+        }
+    }
+
+    // currentPitch_とcurrentYaw_を使って回転クォータニオンを作成
+    Quaternion pitchQuaternion = Quaternion::FromAxisAngle({ 1.0f, 0.0f, 0.0f }, currentPitch_);
+    Quaternion yawQuaternion = Quaternion::FromAxisAngle({ 0.0f, 1.0f, 0.0f }, currentYaw_);
+    worldTransform_.SetRotation(yawQuaternion * pitchQuaternion);
+
+    // カメラのワールド座標を計算
+    Quaternion currentRotation = worldTransform_.rotation_;
+    Vector3 forward = currentRotation.RotateVector(Vector3(0.0f, 0.0f, 1.0f));
+    cameraWorldPosition_ = target_ - forward * distance_;
+}
+
+void DebugCamera::BindProperties(PropertyBinder& binder)
+{
+    binder.Bind("DebugCamera/Target", &target_, target_, 0.1f);
+    binder.Bind("DebugCamera/Distance", &distance_, distance_, 0.1f, 1.0f, 500.0f);
+    binder.Bind("DebugCamera/Pitch", &currentPitch_, currentPitch_, 0.01f, -1.57f, 1.57f);
+    binder.Bind("DebugCamera/Yaw", &currentYaw_, currentYaw_, 0.01f, -3.14f, 3.14f);
+
+    binder.Bind("DebugCamera/DragSpeed", &dragSpeed_, dragSpeed_, 0.001f, 0.001f, 1.0f);
+    binder.Bind("DebugCamera/RotateSpeed", &rotateSpeed_, rotateSpeed_, 0.0001f, 0.0001f, 0.05f);
+    binder.Bind("DebugCamera/ZoomSpeed", &zoomSpeed_, zoomSpeed_, 0.001f, 0.01f, 1.0f);
+}
+
+void DebugCamera::DebugGui(PropertyBinder& binder)
+{
+
+    binder.Draw("DebugCamera/Target", "注視点");
+    binder.Draw("DebugCamera/Distance", "注視点からの距離");
+    binder.Draw("DebugCamera/Pitch", "ピッチ (縦回転)");
+    binder.Draw("DebugCamera/Yaw", "ヨー (横回転)");
+
+    ImGui::Separator();
+
+    binder.Draw("DebugCamera/DragSpeed", "ドラッグ速度");
+    binder.Draw("DebugCamera/RotateSpeed", "回転速度");
+    binder.Draw("DebugCamera/ZoomSpeed", "ズーム速度");
+    
+}
+
+Matrix4x4 DebugCamera::GetViewMatrix()
+{
+    // カメラのワールド行列を作る
+    Matrix4x4 cameraMatrix = Matrix4x4::MakeAffine(
+        Vector3{ 1, 1, 1 },          
+        worldTransform_.rotation_,
+        cameraWorldPosition_
+    );
+
+    // ワールド行列の逆行列がビュー行列
+    return Matrix4x4::Inverse(cameraMatrix);
+}
+
+}

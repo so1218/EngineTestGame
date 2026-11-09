@@ -1,0 +1,83 @@
+#include "Common/Object3D.hlsli"
+#include "Common/ShaderConstants.hlsli"
+
+cbuffer DirectionalLights : register(b1)
+{
+    DirectionalLight gDirectionalLights[MAX_DIRECTIONAL_LIGHTS];
+};
+ConstantBuffer<FrameData> gFrameData : register(b0);
+ConstantBuffer<TransformationMatrix> gTransformationMatrix : register(b6);
+
+StructuredBuffer<Well> gMatrixPalette : register(t8);
+StructuredBuffer<Well> gPrevMatrixPalette : register(t9);
+
+struct SkinningVSInput
+{
+    float4 position : POSITION0;
+    float2 texcoord : TEXCOORD0;
+    float3 normal : NORMAL0;
+    float4 weight : WEIGHT0;
+    int4 index : INDEX0;
+    float3 tangent : TANGENT;
+};
+
+Skinned Skinning(SkinningVSInput input)
+{
+    Skinned skinned;
+
+    // 位置のスキニング
+    skinned.position =
+        mul(input.position, gMatrixPalette[input.index.x].skeletonSpaceMatrix) * input.weight.x +
+        mul(input.position, gMatrixPalette[input.index.y].skeletonSpaceMatrix) * input.weight.y +
+        mul(input.position, gMatrixPalette[input.index.z].skeletonSpaceMatrix) * input.weight.z +
+        mul(input.position, gMatrixPalette[input.index.w].skeletonSpaceMatrix) * input.weight.w;
+    skinned.position.w = 1.0f;
+
+    // 法線のスキニング
+    skinned.normal =
+        mul(input.normal, (float3x3) gMatrixPalette[input.index.x].skeletonSpaceInverseTransposeMatrix) * input.weight.x +
+        mul(input.normal, (float3x3) gMatrixPalette[input.index.y].skeletonSpaceInverseTransposeMatrix) * input.weight.y +
+        mul(input.normal, (float3x3) gMatrixPalette[input.index.z].skeletonSpaceInverseTransposeMatrix) * input.weight.z +
+        mul(input.normal, (float3x3) gMatrixPalette[input.index.w].skeletonSpaceInverseTransposeMatrix) * input.weight.w;
+    skinned.normal = normalize(skinned.normal);
+    
+    // タンジェントのスキニング
+    skinned.tangent =
+        mul(input.tangent, (float3x3) gMatrixPalette[input.index.x].skeletonSpaceMatrix) * input.weight.x +
+        mul(input.tangent, (float3x3) gMatrixPalette[input.index.y].skeletonSpaceMatrix) * input.weight.y +
+        mul(input.tangent, (float3x3) gMatrixPalette[input.index.z].skeletonSpaceMatrix) * input.weight.z +
+        mul(input.tangent, (float3x3) gMatrixPalette[input.index.w].skeletonSpaceMatrix) * input.weight.w;
+    skinned.tangent = normalize(skinned.tangent);
+
+    return skinned;
+}
+
+VertexShaderOutput main(SkinningVSInput input)
+{
+    VertexShaderOutput output;
+    Skinned skinned = Skinning(input);
+
+    // 現在の座標系計算
+    output.position = mul(skinned.position, gTransformationMatrix.WVP);
+
+    // ワールド座標を計算
+    float4 worldPos = mul(skinned.position, gTransformationMatrix.World);
+    output.worldPosition = worldPos.xyz;
+    
+    // 1フレーム前の座標系計算
+    // 過去のボーン行列を使って、1フレーム前のローカル座標を計算
+    float4 prevLocalPos =
+        mul(input.position, gPrevMatrixPalette[input.index.x].skeletonSpaceMatrix) * input.weight.x +
+        mul(input.position, gPrevMatrixPalette[input.index.y].skeletonSpaceMatrix) * input.weight.y +
+        mul(input.position, gPrevMatrixPalette[input.index.z].skeletonSpaceMatrix) * input.weight.z +
+        mul(input.position, gPrevMatrixPalette[input.index.w].skeletonSpaceMatrix) * input.weight.w;
+    prevLocalPos.w = 1.0f;
+
+    // その他データの出力
+    output.texcoord = input.texcoord;
+    output.normal = normalize(mul(skinned.normal, (float3x3) gTransformationMatrix.WorldInverseTranspose));
+    output.tangent = normalize(mul(skinned.tangent, (float3x3) gTransformationMatrix.World));
+    output.worldColor = gTransformationMatrix.WorldColor;
+
+    return output;
+}

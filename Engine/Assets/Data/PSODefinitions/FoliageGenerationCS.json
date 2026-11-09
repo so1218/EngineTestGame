@@ -1,0 +1,4 @@
+{
+  "RootSignature": "FoliageGenerationCS",
+  "ComputeShader": "Environment/FoliageGeneration.CS.hlsl"
+}

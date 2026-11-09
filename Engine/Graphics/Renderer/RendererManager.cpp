@@ -1,0 +1,609 @@
+#include "pch.h"
+#include "RendererManager.h"
+#include "GraphicsDevice.h"
+#include "CommandManager.h"
+#include "PSOManager.h"
+#include "RootSignatureManager.h"
+#include "LightManager.h"
+#include "SRVManager.h"
+#include "GlobalConstants.h"
+#include "MaterialManager.h"
+#include "BufferManager.h"
+#include "ShapeGenerator.h"
+#include "Camera.h"
+#include "PostEffectManager.h"
+#include "TextureManager.h"
+#include "ModelRenderer.h"
+#include "SpriteRenderer.h"
+#include "LineRenderer.h"
+#include "ParticleRenderer.h"
+#include "TrailRenderer.h"
+#include "SkyboxRenderer.h"
+#include "GrassRenderer.h"
+#include "SkydomeRenderer.h"
+#include "TerrainRenderer.h"
+#include "LightningRenderer.h"
+#include "TreeRenderer.h"
+#include "PIXColors.h"
+#include "Engine.h"
+
+namespace FS
+{
+
+RendererManager::RendererManager() {}
+RendererManager::~RendererManager() {}
+
+void RendererManager::Initialize(
+	GraphicsDevice* device, CommandManager* commandManager,
+	PSOManager* psoManager, RootSignatureManager* rootSignatureManager,
+	TextureLoader* textureLoader, SRVManager* srvManager, LightManager* lightManager,
+	GlobalConstants* globalConstants, MaterialManager* materialManager,
+	PostEffectManager* postEffectManager, RenderCoordinator* renderCoordinator,
+	int clientWidth, int clientHeight, ShadowMap* shadowMap)
+{
+	// ポインタをメンバ変数に保存
+	device_ = device;
+	commandManager_ = commandManager;
+	psoManager_ = psoManager;
+	rootSignatureManager_ = rootSignatureManager;
+	textureLoader_ = textureLoader;
+	srvManager_ = srvManager;
+	lightManager_ = lightManager;
+	globalConstants_ = globalConstants;
+	materialManager_ = materialManager;
+	postEffectManager_ = postEffectManager;
+	renderCoordinator_ = renderCoordinator;
+
+	env_.device = device_;
+	env_.commandManager = commandManager_;
+	env_.psoManager = psoManager_;
+	env_.rootSignatureManager = rootSignatureManager_;
+	env_.textureLoader = textureLoader_;
+	env_.srvManager = srvManager_;
+	env_.lightManager = lightManager_;
+	env_.globalConstants = globalConstants_;
+	env_.materialManager = materialManager_;
+	env_.postEffectManager = postEffectManager_;
+
+	modelRenderer_ = std::make_unique<ModelRenderer>();
+	modelRenderer_->Initialize(env_);
+	spriteRenderer_ = std::make_unique<SpriteRenderer>();
+	spriteRenderer_->Initialize(env_, clientWidth, clientHeight);
+	lineRenderer_ = std::make_unique<LineRenderer>();
+	lineRenderer_->Initialize(env_);
+	particleRenderer_ = std::make_unique<ParticleRenderer>();
+	particleRenderer_->Initialize(env_);
+	trailRenderer_ = std::make_unique<TrailRenderer>();
+	trailRenderer_->Initialize(env_);
+	skyboxRenderer_ = std::make_unique<SkyboxRenderer>();
+	skyboxRenderer_->Initialize(env_);
+	grassRenderer_ = std::make_unique<GrassRenderer>();
+	treeRenderer_ = std::make_unique<TreeRenderer>();
+	treeRenderer_->Initialize(env_);
+	foliageRenderer_ = std::make_unique<FoliageRenderer>();
+	skydomeRenderer_ = std::make_unique<SkydomeRenderer>();
+	skydomeRenderer_->Initialize(env_);
+	terrainRenderer_ = std::make_unique<TerrainRenderer>();
+	terrainRenderer_->Initialize(env_);
+	lightningRenderer_ = std::make_unique<LightningRenderer>();
+	lightningRenderer_->Initialize(env_);
+
+	viewMatrix_ = Matrix4x4::MakeIdentity();
+	projectionMatrix_ = Matrix4x4::MakeIdentity();
+	viewProjectionMatrix_ = Matrix4x4::MakeIdentity();
+
+	shadowMap_ = shadowMap;
+}
+
+void RendererManager::Finalize()
+{
+	if (modelRenderer_) { modelRenderer_->Finalize(); }
+}
+
+void RendererManager::BeginFrame()
+{
+	if (modelRenderer_) { modelRenderer_->BeginFrame(); }
+	if (spriteRenderer_) { spriteRenderer_->BeginFrame(); }
+	if (lineRenderer_) { lineRenderer_->BeginFrame(); }
+	if (particleRenderer_) { particleRenderer_->BeginFrame(); }
+	if (trailRenderer_) { trailRenderer_->BeginFrame(); }
+	if (skyboxRenderer_) { skyboxRenderer_->BeginFrame(); }
+	if (grassRenderer_) { grassRenderer_->BeginFrame(); }
+	if (treeRenderer_) { treeRenderer_->BeginFrame(); }
+	if (foliageRenderer_) { foliageRenderer_->BeginFrame(); }
+	if (skydomeRenderer_) { skydomeRenderer_->BeginFrame(); }
+	if (terrainRenderer_) { terrainRenderer_->BeginFrame(); }
+	if (lightningRenderer_) { lightningRenderer_->BeginFrame(); }
+
+	interactionEntities_.clear(); // フレーム開始時にリストをクリア
+}
+
+void RendererManager::SetCameraState(const Matrix4x4& view, const Matrix4x4& projection, const Vector3& cameraPosition)
+{
+	viewMatrix_ = view;
+	projectionMatrix_ = projection;
+	viewProjectionMatrix_ = view * projection;
+	cameraPosition_ = cameraPosition;
+
+	if (modelRenderer_)
+	{
+		modelRenderer_->SetCameraState(viewMatrix_, viewProjectionMatrix_);
+	}
+
+	if (treeRenderer_)
+	{
+		treeRenderer_->SetCameraState(viewMatrix_, viewProjectionMatrix_);
+	}
+}
+
+void RendererManager::UpdateCullingFrustums()
+{
+	// カメラのフラスタムを更新
+	cameraFrustum_.ExtractFromMatrix(viewProjectionMatrix_);
+
+	// 影用のフラスタム（カスケード4段分）を更新
+	shadowFrustums_.resize(MAX_CASCADE_COUNT - 1);
+	if (lightManager_)
+	{
+		const ShadowData* shadowData = lightManager_->GetShadowData();
+		for (int i = 0; i < MAX_CASCADE_COUNT - 1; ++i)
+		{
+			shadowFrustums_[i].ExtractFromMatrix(shadowData->cascadeLightViewProj[i]);
+		}
+	}
+}
+
+void RendererManager::DrawPostEffectsProcess(uint32_t inputSrvIndex)
+{
+	auto* cmdList = commandManager_->GetCommandList();
+
+	PIXScopedEvent(cmdList, FS::PIXColors::PostProcess, "Post Effects Pass");
+
+	// SRVヒープをセット（ポストプロセス入力用）
+	ID3D12DescriptorHeap* heaps[] = { srvManager_->GetSRVHeap() };
+	cmdList->SetDescriptorHeaps(_countof(heaps), heaps);
+
+	// フルスクリーン用PSO / ルートシグネチャ
+	cmdList->SetPipelineState(psoManager_->GetPSO("PostEffects"));
+	cmdList->SetGraphicsRootSignature(rootSignatureManager_->GetRootSignature("PostEffects"));
+
+	// ポストエフェクト定数バッファ
+	cmdList->SetGraphicsRootConstantBufferView(0, postEffectManager_->GetPostEffectDataAddress());
+
+	// 最終入力テクスチャ（Bloom合成結果）
+	cmdList->SetGraphicsRootDescriptorTable(1, srvManager_->GetSRVHandleGPU(inputSrvIndex));
+
+	cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	cmdList->DrawInstanced(3, 1, 0, 0);
+}
+
+void RendererManager::DrawFullScreenQuadWithOffscreenTexture()
+{
+	DrawPostEffectsProcess(postEffectManager_->GetFinalCompositeSRVIndex());
+}
+
+// 単純にテクスチャをそのまま画面に出すメソッド
+void RendererManager::DrawFinalResult(uint32_t srvIndex)
+{
+	auto cmdList = commandManager_->GetCommandList();
+
+	PIXScopedEvent(cmdList, FS::PIXColors::PostProcess, "Draw Final Result To BackBuffer");
+
+	// SRVヒープをセット
+	ID3D12DescriptorHeap* heaps[] = { srvManager_->GetSRVHeap() };
+	cmdList->SetDescriptorHeaps(_countof(heaps), heaps);
+
+	// バックバッファ用の FinalCopy PSO / ルートシグネチャをセット
+	cmdList->SetPipelineState(psoManager_->GetPSO("FinalCopy"));
+	cmdList->SetGraphicsRootSignature(rootSignatureManager_->GetRootSignature("FinalCopy"));
+
+	// 転送元の最終合成テクスチャを t0 にバインド
+	cmdList->SetGraphicsRootDescriptorTable(0, srvManager_->GetSRVHandleGPU(srvIndex));
+
+	cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	cmdList->DrawInstanced(3, 1, 0, 0);
+}
+
+void RendererManager::PrepareShadowBatches()
+{
+	if (modelRenderer_)
+	{
+		modelRenderer_->PrepareBatches();
+	}
+	if (treeRenderer_)
+	{ 
+		treeRenderer_->PrepareBatches();
+	}
+
+	auto* cmdList = commandManager_->GetCommandList();
+	ID3D12DescriptorHeap* heaps[] = { srvManager_->GetSRVHeap() };
+	cmdList->SetDescriptorHeaps(_countof(heaps), heaps);
+}
+
+void RendererManager::DrawSceneForShadow(uint32_t cascadeIndex)
+{
+	if (terrainRenderer_)
+	{
+		terrainRenderer_->DrawShadow(env_, cascadeIndex);
+	}
+
+	if (treeRenderer_)
+	{
+		treeRenderer_->DrawShadow(env_, cascadeIndex, windMapSrvIndex_);
+	}
+
+	if (modelRenderer_)
+	{
+		modelRenderer_->DrawShadow(env_, cascadeIndex);
+	}
+}
+
+void RendererManager::Draw3D()
+{
+	auto* cmdList = commandManager_->GetCommandList();
+
+	// 共通設定
+	ID3D12DescriptorHeap* heaps[] = { srvManager_->GetSRVHeap() };
+	cmdList->SetDescriptorHeaps(_countof(heaps), heaps);
+	cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+	// 不透明モデルをまとめて描画
+	// 不透明オブジェクトの最序盤にTerrainを描画 (Early-Z最適化)
+	if (terrainRenderer_)
+	{
+		terrainRenderer_->Draw(env_, shadowMap_);
+	}
+
+	if (foliageRenderer_)
+	{
+		foliageRenderer_->Draw(
+			env_,
+			shadowMap_,
+			foliageCullingData_,
+			interactionData_.cbAddress,
+			srvManager_->GetSRVHandleGPU(GetWorldInteractionSRVIndex())
+		);
+	}
+
+	if (treeRenderer_)
+	{
+		treeRenderer_->Draw(env_, shadowMap_, windMapSrvIndex_);
+	}
+
+	if (modelRenderer_)
+	{
+		modelRenderer_->Draw(env_, RenderGroup::Opaque, shadowMap_);
+	}
+
+
+	if (grassRenderer_)
+	{
+		grassRenderer_->Draw(env_, grassTextureHandle_, shadowMap_, grassMaterialData_, grassCullingData_,
+			interactionData_.cbAddress, srvManager_->GetSRVHandleGPU(GetWorldInteractionSRVIndex()));
+	}
+
+	if (modelRenderer_) 
+	{
+		modelRenderer_->Draw(env_, RenderGroup::Grid, shadowMap_);
+	}
+
+	if (skyboxRenderer_)
+	{
+		skyboxRenderer_->Draw(env_, viewMatrix_, projectionMatrix_);
+	}
+
+	if (lineRenderer_)
+	{
+		lineRenderer_->Draw(env_, viewProjectionMatrix_);
+	}
+
+	if (skydomeRenderer_)
+	{
+		skydomeRenderer_->Draw(env_, viewMatrix_, projectionMatrix_);
+	}
+
+	// 半透明モデルをまとめて描画
+	if (modelRenderer_)
+	{
+		modelRenderer_->Draw(env_, RenderGroup::Transparent, shadowMap_);
+	}
+
+	if (particleRenderer_)
+	{
+		particleRenderer_->Draw(env_);
+	}
+
+	if (trailRenderer_) 
+	{
+		trailRenderer_->Draw(env_, viewProjectionMatrix_);
+	}
+
+	if (lightningRenderer_)
+	{
+		lightningRenderer_->Draw(env_, cameraPosition_);
+	}
+}
+
+void RendererManager::DrawUI()
+{
+	auto* cmdList = commandManager_->GetCommandList();
+
+	ID3D12DescriptorHeap* heaps[] = { srvManager_->GetSRVHeap() };
+	cmdList->SetDescriptorHeaps(_countof(heaps), heaps);
+	cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+	if (spriteRenderer_)
+	{
+		spriteRenderer_->Draw(env_);
+	}
+}
+
+void RendererManager::SubmitModel(const WorldTransform& worldTransform, const ModelData& modelData,
+	const std::vector<MaterialHandle>& materials, BlendMode blendMode, CullMode cullMode,
+	DepthMode depthMode, RenderGroup group, const Vector4& instanceColor)
+{
+	if (modelRenderer_)
+	{
+		// キャッシュされたフラスタム情報を渡す
+		modelRenderer_->Submit(
+			worldTransform, modelData, materials, blendMode, cullMode, depthMode, group, instanceColor,
+			cameraFrustum_, shadowFrustums_ 
+		);
+	}
+}
+
+void RendererManager::ClearSceneRenderStates()
+{
+	if (grassRenderer_)   grassRenderer_->Reset();
+	if (foliageRenderer_) foliageRenderer_->Reset();
+	if (treeRenderer_)    treeRenderer_->Reset();
+}
+
+void RendererManager::SubmitAnimationModel(
+	const WorldTransform& worldTransform,
+	const AnimatedModelData& instance,
+	const SkinCluster& skinCluster,
+	const std::vector<MaterialHandle>& materials,
+	BlendMode blendMode,
+	RenderGroup group,
+	const Vector4& instanceColor)
+{
+	if (modelRenderer_)
+	{
+		modelRenderer_->SubmitAnimation(
+			worldTransform, instance, skinCluster, materials, blendMode, group, instanceColor,
+			cameraFrustum_, shadowFrustums_
+		);
+	}
+}
+
+void RendererManager::SubmitSprite(const SpriteInstance& instance, int layerOrder)
+{
+	if (spriteRenderer_)
+	{
+		// UI は高さ 720 の画面を基準に置いているので、実際の解像度に合わせて拡大する
+		SpriteInstance scaledInstance = instance;
+		const float uiScale = Engine::GetUIScale();
+		scaledInstance.position = instance.position * uiScale;
+		scaledInstance.size = instance.size * uiScale;
+		spriteRenderer_->Submit(scaledInstance, layerOrder);
+	}
+}
+
+void RendererManager::SubmitLine(const Vector3& start, const Vector3& end, uint32_t color)
+{
+	if (lineRenderer_) { lineRenderer_->Submit(start, end, color); }
+}
+
+void RendererManager::SubmitParticleInstance(const WorldTransform& worldTransform, uint32_t color, uint32_t textureIndex, float rotationZ,
+	BlendMode blendMode, bool isBillboard, float intensity)
+{
+	if (particleRenderer_)
+	{
+		particleRenderer_->Submit(worldTransform, color, textureIndex, rotationZ, blendMode, isBillboard, intensity);
+	}
+}
+
+void RendererManager::SubmitTrail(const std::vector<TrailPoint>& points, const TrailModule& config,
+	float instanceSeed)
+{
+	if (trailRenderer_) 
+	{
+		trailRenderer_->Submit(points, config, cameraPosition_, instanceSeed);
+	}
+}
+
+void RendererManager::SubmitSkybox(const WorldTransform& worldTransform, uint32_t color, uint32_t cubeTextureSrvIndex)
+{
+	if (skyboxRenderer_)
+	{
+		skyboxRenderer_->Submit(worldTransform, color, cubeTextureSrvIndex);
+	}
+}
+
+void RendererManager::InitializeGrass()
+{
+	if (grassRenderer_)
+	{
+		grassRenderer_->Initialize(env_);
+	}
+}
+
+void RendererManager::SetGrassRenderingParams(uint32_t windMapHandle, const GrassMaterialData& materialData, const GrassCullingData& cullingData)
+{
+	grassTextureHandle_ = windMapHandle;
+	grassMaterialData_ = materialData;
+	grassCullingData_ = cullingData; 
+}
+
+void RendererManager::GenerateGrass(const GrassGenerationData& genData, uint32_t heightMapSrvHandle, uint32_t densityMapSrvHandle)
+{
+	// 両方のレンダラーが存在しているか確認
+	if (grassRenderer_ && terrainRenderer_)
+	{
+		// TerrainRendererから地形設定のアドレスをもらい、GrassRendererに渡す
+		D3D12_GPU_VIRTUAL_ADDRESS terrainSettingsAddr = terrainRenderer_->GetSettingsBuffer()->GetGPUVirtualAddress();
+
+		grassRenderer_->GenerateGrass(
+			env_,
+			genData,
+			heightMapSrvHandle,
+			densityMapSrvHandle,
+			terrainSettingsAddr
+		);
+	}
+}
+
+void RendererManager::SubmitTree(const WorldTransform& worldTransform, const ModelData& modelData,
+	const TreeMaterialHandle& treeMaterial)
+{
+	if (treeRenderer_)
+	{
+		treeRenderer_->Submit(worldTransform, modelData, treeMaterial);
+	}
+}
+
+void RendererManager::InitializeFoliage(const std::vector<FoliageTypeConfig>& configs)
+{
+	if (foliageRenderer_)
+	{
+		foliageRenderer_->Initialize(env_, configs);
+	}
+}
+
+void RendererManager::SetFoliageRenderingParams(const FoliageCullingData& cullingData)
+{
+	foliageCullingData_ = cullingData;
+}
+
+void RendererManager::UpdateFoliageConfigs(const std::vector<FoliageTypeConfig>& configs)
+{
+	if (foliageRenderer_)
+	{
+		foliageRenderer_->UpdateConfigs(configs);
+	}
+}
+
+void RendererManager::GenerateFoliage(uint32_t heightMapSrvHandle)
+{
+	// TerrainRendererから地形バッファのGPUアドレスを取得してFoliageRendererへ渡す
+	if (foliageRenderer_ && terrainRenderer_)
+	{
+		D3D12_GPU_VIRTUAL_ADDRESS terrainSettingsAddr =
+			terrainRenderer_->GetSettingsBuffer()->GetGPUVirtualAddress();
+
+		foliageRenderer_->GenerateFoliage(
+			env_,
+			heightMapSrvHandle,
+			terrainSettingsAddr
+		);
+	}
+}
+
+void RendererManager::SubmitSkydome(uint32_t cloudNoiseSrvIndex, const AtmosphereSkyData& atmosphereSkyData)
+{
+	if (skydomeRenderer_)
+	{
+		skydomeRenderer_->Submit(cloudNoiseSrvIndex, atmosphereSkyData);
+	}
+}
+
+void RendererManager::SubmitTerrain(const TerrainDrawData& drawData, const std::vector<TerrainChunkData>& visibleChunks)
+{
+	terrainHeightMapSrvIndex_ = drawData.heightMapHandle;
+
+	if (terrainRenderer_)
+	{
+		terrainRenderer_->Submit(drawData, visibleChunks);
+	}
+}
+
+void RendererManager::SubmitLightning(const std::vector<LightningPath>& paths, float brightness)
+{
+	if (lightningRenderer_)
+	{
+		lightningRenderer_->Submit(paths, brightness);
+	}
+}
+
+void RendererManager::SetLightningConfig(const LightningConfig& config)
+{
+	if (lightningRenderer_)
+	{
+		lightningRenderer_->SetConfig(config);
+	}
+}
+
+uint32_t RendererManager::GetModelCount() const 
+{
+	return modelRenderer_ ? modelRenderer_->GetCount() : 0;
+}
+uint32_t RendererManager::GetSpriteCount() const 
+{
+	return spriteRenderer_ ? spriteRenderer_->GetCount() : 0;
+}
+uint32_t RendererManager::GetLineCount() const 
+{
+	return lineRenderer_ ? lineRenderer_->GetCount() : 0;
+}
+uint32_t RendererManager::GetParticleCount() const
+{ 
+	return particleRenderer_ ? particleRenderer_->GetCount() : 0;
+}
+uint32_t RendererManager::GetTrailCount() const
+{
+	return trailRenderer_ ? trailRenderer_->GetCount() : 0;
+}
+
+uint32_t RendererManager::GetMaxModelCount() const 
+{
+	return modelRenderer_ ? modelRenderer_->GetMaxCount() : 0;
+}
+uint32_t RendererManager::GetMaxSpriteCount() const 
+{
+	return spriteRenderer_ ? spriteRenderer_->GetMaxCount() : 0;
+}
+uint32_t RendererManager::GetMaxLineCount() const 
+{
+	return lineRenderer_ ? lineRenderer_->GetMaxCount() : 0;
+}
+uint32_t RendererManager::GetMaxParticleCount() const
+{
+	return particleRenderer_ ? particleRenderer_->GetMaxCount() : 0;
+}
+uint32_t RendererManager::GetMaxTrailCount() const
+{
+	return trailRenderer_ ? trailRenderer_->GetMaxCount() : 0;
+}
+
+void RendererManager::TransitionColorToShaderResource()
+{
+	if (!offscreenColorResource_) return;
+
+	auto* cmdList = commandManager_->GetCommandList();
+
+	D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+		offscreenColorResource_,
+		D3D12_RESOURCE_STATE_RENDER_TARGET,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+	);
+
+	cmdList->ResourceBarrier(1, &barrier);
+}
+
+void RendererManager::TransitionColorToRenderTarget()
+{
+	if (!offscreenColorResource_) return;
+
+	auto* cmdList = commandManager_->GetCommandList();
+
+	D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(
+		offscreenColorResource_,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+		D3D12_RESOURCE_STATE_RENDER_TARGET
+	);
+
+	cmdList->ResourceBarrier(1, &barrier);
+}
+
+}

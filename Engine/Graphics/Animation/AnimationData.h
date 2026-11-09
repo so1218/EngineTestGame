@@ -1,0 +1,135 @@
+#pragma once
+#include "Quaternion.h"
+#include "Structures.h"
+#include "WorldTransform.h"
+
+namespace FS
+{
+
+class SRVManager;
+
+static uint32_t constexpr kNumMaxInfluence = 4;
+
+template<typename tValue>
+struct Keyframe
+{
+    float time;
+    tValue value;
+};
+
+using KeyframeVector3 = Keyframe<Vector3>;
+using KeyframeQuaternion = Keyframe <Quaternion>;
+
+template<typename tValue>
+struct AnimationCurve
+{
+    std::vector< Keyframe <tValue>> keyframes;
+};
+
+struct NodeAnimation
+{
+    AnimationCurve<Vector3> translate;
+    AnimationCurve<Quaternion> rotate;
+    AnimationCurve<Vector3> scale;
+};
+
+struct Animation
+{
+    float duration; // アニメーション全体の尺(単位は秒)
+    // NodeAnimationの集合。Node名で引けるようにしておく
+    std::map<std::string, NodeAnimation> nodeAnimations;
+    // rootNodeの名前
+    std::string rootNodeName;
+};
+
+struct AnimatedModelData
+{
+    const ModelData* modelData = nullptr;
+    const Animation* currentAnimation = nullptr;
+
+    float animationTime = 0.0f;
+    Matrix4x4 localMatrix;  // 現在のアニメーション変換行列
+
+};
+
+struct Joint
+{
+    WorldTransform transform;
+    WorldTransform initialTransform; // 初期姿勢保持用
+    Matrix4x4 localMatrix;
+    Matrix4x4 skeletonSpaceMatrix; // skeletonSpaceでの変換行列
+    std::string name;
+    std::vector<int32_t> children; // 子Jointのインデックスのリスト。いなければ空
+    int32_t index; // 自身のインデックス
+    std::optional<int32_t> parent; // 親Jointのインデックス。いなければnull
+};
+
+struct Skeleton
+{
+    int32_t root; // RootJointのIndex
+    std::map<std::string, int32_t> jointMap; // Joint名とIndexとの辞書
+    std::vector<Joint> joints; // 所属しているジョイント
+};
+
+struct VertexInfluence
+{
+    std::array<float, kNumMaxInfluence> weights;
+    std::array<int32_t, kNumMaxInfluence> jointIndices; // JointのIndex
+};
+
+struct WellForGPU
+{
+    Matrix4x4 skeletonSpaceMatrix; // 位置用
+    Matrix4x4 skeletonSpaceInverseTransposeMatrix; // 法線用 
+};
+
+struct SkinCluster
+{
+    // メッシュごとに異なるデータ
+    struct MeshInfluence {
+        Microsoft::WRL::ComPtr<ID3D12Resource> influenceResource;
+        D3D12_VERTEX_BUFFER_VIEW influenceBufferView;
+        std::span<VertexInfluence> mappedInfluence;
+    };
+    std::vector<MeshInfluence> meshInfluences; // メッシュの数だけ用意する
+
+    std::vector<Matrix4x4> inverseBindPoseMatrices;
+
+    // CPU 側で計算した最新のパレット。GPU 用のメモリは読むと遅いので、CPU から読むときはこちらを使う
+    std::vector<WellForGPU> palette;
+    // 最後に GPU へ書き込んだパレット。次に書き込むときに、1フレーム前のパレットになる
+    std::vector<WellForGPU> uploadedPalette;
+
+    // 現在のフレーム用
+    Microsoft::WRL::ComPtr<ID3D12Resource> paletteResource;
+    std::span<WellForGPU> mappedPalette;
+    uint32_t paletteSrvIndex;
+
+    // 1フレーム前のパレット用データ
+    Microsoft::WRL::ComPtr<ID3D12Resource> prevPaletteResource;
+    std::span<WellForGPU> prevMappedPalette;
+    uint32_t prevPaletteSrvIndex;
+};
+
+Skeleton CreateSkeleton(const Node& rootNode);
+
+Vector3 CalculateValue(const std::vector<KeyframeVector3>& keyframes, float time);
+Quaternion CalculateValue(const std::vector<KeyframeQuaternion>& keyframes, float time);
+void ApplyAnimation(Skeleton& skeleton, const Animation& animation, float animationTime);
+void ApplyBlendAnimation(
+    Skeleton& skeleton,
+    const Animation& prevAnimation, float prevTime,
+    const Animation& currentAnimation, float currentTime,
+    float blendFactor);
+void UpdateSkeleton(Skeleton& skeleton);
+SkinCluster CreateSkinCluster(
+    const Microsoft::WRL::ComPtr<ID3D12Device>& device,
+    const Skeleton& skeleton,
+    const ModelData& modelData,
+    SRVManager* srvManager);
+// スケルトンからパレットを計算する。CPU 側だけなので、1フレームに何度呼んでもよい
+void UpdateSkinCluster(SkinCluster& skinCluster, const Skeleton& skeleton);
+// 計算したパレットを GPU に書き込む。前フレームのパレットもここで決まるので、1フレームに1回だけ呼ぶ
+void UploadSkinCluster(SkinCluster& skinCluster);
+
+}
