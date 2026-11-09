@@ -1,0 +1,28 @@
+#pragma once
+
+namespace FS
+{
+
+class SwapChain
+{
+public:
+	// バックバッファの数。RTVManager もこの数だけRTVを作る
+	static constexpr uint32_t kBufferCount = 2;
+
+	void Initialize(
+		HWND hwnd,
+		ID3D12CommandQueue* commandQueue,
+		uint32_t width,
+		uint32_t height,
+		Microsoft::WRL::ComPtr <IDXGIFactory7> dxgiFactory);
+	void Present();
+
+	IDXGISwapChain4* GetSwapChain() const { return dxgiSwapChain_.Get(); }
+	const DXGI_SWAP_CHAIN_DESC1& GetSwapChainDesc() const { return swapChainDesc_; }
+
+private:
+	Microsoft::WRL::ComPtr <IDXGISwapChain4> dxgiSwapChain_ = nullptr;
+	DXGI_SWAP_CHAIN_DESC1 swapChainDesc_{};
+};
+
+}

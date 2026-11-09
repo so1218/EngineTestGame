@@ -1,0 +1,14 @@
+{
+  "RootSignature": "Line",
+  "VertexShader": "Debug/Line.VS.hlsl",
+  "PixelShader": "Debug/Line.PS.hlsl",
+  "InputLayout": "Line",
+  "BlendState": "AlphaBlend",
+  "RasterizerState": "LineAA",
+  "DepthStencilState": "Default",
+  "Topology": "Line",
+  "RTVFormats": [
+    "R16G16B16A16_FLOAT"
+  ],
+  "DSVFormat": "D24_UNORM_S8_UINT"
+}

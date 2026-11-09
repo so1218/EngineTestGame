@@ -1,0 +1,88 @@
+#pragma once
+
+namespace FS
+{
+
+class BufferManager
+{
+public:
+    // 指定されたサイズのバッファリソースを作成
+    static Microsoft::WRL::ComPtr<ID3D12Resource> CreateBufferResource(
+        ID3D12Device* device,
+        size_t sizeInBytes,
+        D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE, // リソースフラグ
+        D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_GENERIC_READ, // 初期状態
+        D3D12_HEAP_TYPE heapType = D3D12_HEAP_TYPE_UPLOAD // ヒープタイプ
+    );
+
+    static Microsoft::WRL::ComPtr<ID3D12Resource> CreateUAVBufferResource(ID3D12Device* device, size_t size);
+
+    // 汎用バッファ（頂点バッファ・インデックスバッファなど）の作成とマップを同時に行う
+    template <typename T>
+    static Microsoft::WRL::ComPtr<ID3D12Resource> CreateMappedBuffer(
+        ID3D12Device* device,
+        size_t elementCount,
+        T** outMappedPtr)
+    {
+        size_t sizeInBytes = sizeof(T) * elementCount;
+        auto buffer = CreateBufferResource(device, sizeInBytes);
+
+        // 型安全にマップ
+        buffer->Map(0, nullptr, reinterpret_cast<void**>(outMappedPtr));
+        return buffer;
+    }
+
+    // 定数バッファ専用の作成とマップ（256バイトアライメントを自動計算）
+    template <typename T>
+    static Microsoft::WRL::ComPtr<ID3D12Resource> CreateMappedConstantBuffer(
+        ID3D12Device* device,
+        T** outMappedPtr)
+    {
+        // 定数バッファ必須の256バイトアライメント
+        size_t sizeInBytes = (sizeof(T) + 255) & ~255;
+        auto buffer = CreateBufferResource(device, sizeInBytes);
+
+        buffer->Map(0, nullptr, reinterpret_cast<void**>(outMappedPtr));
+        return buffer;
+    }
+
+    // 定数バッファの配列を作成しマップ（1要素ごとに256バイトアライメント）
+    template <typename T>
+    static Microsoft::WRL::ComPtr<ID3D12Resource> CreateMappedConstantBufferArray(
+        ID3D12Device* device,
+        size_t elementCount,
+        T** outMappedPtr)
+    {
+        // 1要素あたりのサイズを256バイトの倍数に切り上げ
+        size_t alignedSizePerElement = (sizeof(T) + 255) & ~255;
+        // 必要なトータルサイズを計算
+        size_t totalSizeInBytes = alignedSizePerElement * elementCount;
+
+        auto buffer = CreateBufferResource(device, totalSizeInBytes);
+
+        // マップ
+        buffer->Map(0, nullptr, reinterpret_cast<void**>(outMappedPtr));
+        return buffer;
+    }
+
+    // cbuffer内の配列用：要素間は詰めつつ、全体サイズを256バイトアライメントして作成・マップ
+    template <typename T>
+    static Microsoft::WRL::ComPtr<ID3D12Resource> CreateMappedConstantBufferArrayPacked(
+        ID3D12Device* device,
+        size_t elementCount,
+        T** outMappedPtr)
+    {
+        // 配列全体のデータサイズを計算
+        size_t totalSize = sizeof(T) * elementCount;
+        // バッファ全体のサイズを256バイトの倍数に切り上げ 
+        size_t alignedTotalSize = (totalSize + 255) & ~255;
+
+        auto buffer = CreateBufferResource(device, alignedTotalSize);
+
+        // マップ
+        buffer->Map(0, nullptr, reinterpret_cast<void**>(outMappedPtr));
+        return buffer;
+    }
+};
+
+}

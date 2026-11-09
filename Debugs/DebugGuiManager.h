@@ -1,0 +1,56 @@
+#pragma once
+#include "Vector.h"
+
+namespace FS
+{
+
+class Camera;
+class LightManager;
+class MaterialManager;
+class TextureLoader;
+class PostEffectManager;
+class DebugCamera;
+class Engine;
+class SRVManager;
+class PropertyBinder;
+
+class DebugGuiManager
+{
+public:
+    DebugGuiManager();
+    ~DebugGuiManager(); 
+
+    void Initialize(Engine* engine, LightManager* lightManager, MaterialManager* materialManager, 
+        TextureLoader* textureLoader, PostEffectManager* postEffectManager, DebugCamera* debugCamera);
+    void Update(Camera* targetCamera);
+
+    void BeginSceneView(SRVManager* srvManager, uint32_t srvIndexToShow);
+    void EndSceneView();
+
+    void DrawSelectedLightGizmo();
+
+private:
+    Engine* engine_; 
+    LightManager* lightManager_;
+    MaterialManager* materialManager_;
+    TextureLoader* textureLoader_;
+    PostEffectManager* postEffectManager_;
+    DebugCamera* debugCamera_;
+
+    // フレームの途中で表示が切り替わっても、Begin した回だけ End するために覚えておく
+    bool isSceneViewBegun_ = false;
+
+    // エンジン全体のプロパティバインダー
+    std::unique_ptr<PropertyBinder> engineBinder_;
+
+    // 光源設定
+    Vector3 directionalLightDirection_ = { 0.0f, -1.0f, 0.0f };
+    Vector4 directionalLightColor_ = { 1.0f, 1.0f, 1.0f, 1.0f };
+    float directionalLightIntensity_ = 1.0f;
+
+    void DrawRenderSettings();
+    void DrawTimeSettings();
+    void DrawInformationDisplays();  
+};
+
+}

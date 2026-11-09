@@ -1,0 +1,100 @@
+#pragma once
+
+namespace FS
+{ 
+
+class SRVManager;
+
+enum class TextureType
+{
+    Albedo,
+    Normal,
+    Toon,
+    Noise,
+    CubeMap,
+    Particle,
+    UI,
+    Unknown
+};
+
+class TextureLoader
+{
+public:
+    struct TextureResources
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> texture;
+        Microsoft::WRL::ComPtr<ID3D12Resource> intermediate;
+        DirectX::TexMetadata metadata;
+        uint32_t srvIndex; // SRVヒープのインデックス番号を保存
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandleCPU;
+    };
+
+    struct UploadResourceEntry 
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> resource;
+        uint64_t fenceValue;
+    };
+
+    TextureLoader();
+    ~TextureLoader();
+
+    static DirectX::ScratchImage LoadTexture(const std::string& filePath);
+
+    void Initialize(ID3D12Device* device, ID3D12GraphicsCommandList* commandList, SRVManager* srvManager);
+
+    // ゲーム側から呼ばれるメインのロード関数
+    uint32_t Load(const std::string& filePath);
+
+    TextureResources UploadTexture(DirectX::ScratchImage& mipImages);
+
+    // メモリ上の画像からテクスチャを作る
+    uint32_t LoadFromImage(const std::string& cacheKey, DirectX::ScratchImage& image);
+
+    TextureResources UploadTex(DirectX::ScratchImage& mipImages);
+
+    void AddNewUpload(const TextureResources& resource) {
+        newUploads_.push_back(resource);
+    }
+
+    void RegisterPendingUpload(Microsoft::WRL::ComPtr<ID3D12Resource> intermediate, uint64_t fenceValue);
+    void CleanupCompletedUploads(uint64_t completedFenceValue);
+
+    std::vector<DirectX::ScratchImage> LoadMultipleTextures(const std::vector<std::string>& texturePaths);
+
+    static bool ConvertAndSaveToDDS(
+        const std::string& srcPath,
+        const std::string& dstDdsPath,
+        TextureType type
+    );
+
+    uint32_t LoadWithAutoDDS(const std::string& filePath, TextureType type);
+
+    // フレーム終了時に呼ぶ。今フレームのアップロードを登録し、GPU が使い終わったものを解放
+    void OnFrameEnd(uint64_t submittedFenceValue, uint64_t completedFenceValue);
+    
+    // ゲッター
+    const std::vector<UploadResourceEntry>& GetPendingUploadResources() const { return pendingUploadResources_; }
+
+private:
+    static Microsoft::WRL::ComPtr<ID3D12Resource> CreateTextureResource(ID3D12Device* device, const DirectX::TexMetadata& metadata);
+    static Microsoft::WRL::ComPtr<ID3D12Resource> UploadTextureData(ID3D12Resource* texture, const DirectX::ScratchImage& mipImages, ID3D12Device* device, ID3D12GraphicsCommandList* commandList);
+
+    ID3D12Device* device_ = nullptr;
+    ID3D12GraphicsCommandList* commandList_ = nullptr;
+
+    std::vector<UploadResourceEntry> pendingUploadResources_;
+    SRVManager* srvManager_;
+
+    uint32_t textureArraySrvIndex_;
+
+    // 永続リスト (デストラクタでのSRV解放用)
+    std::vector<TextureResources> loadedTextures_;
+
+    // 一時リスト (中間バッファのクリーンアップ用)
+    std::vector<TextureResources> newUploads_;
+
+    // 読み込み済みのテクスチャを記録するキャッシュ
+    std::unordered_map<std::string, uint32_t> textureCache_;
+};
+
+}

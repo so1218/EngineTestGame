@@ -1,0 +1,190 @@
+#include "pch.h"
+#include "TrailRenderer.h"
+#include "GraphicsDevice.h"
+#include "CommandManager.h"
+#include "PSOManager.h"
+#include "RootSignatureManager.h"
+#include "LightManager.h"
+#include "SRVManager.h"
+#include "GlobalConstants.h"
+#include "BufferManager.h"
+#include "PostEffectManager.h"
+#include "PIXColors.h"
+
+namespace FS
+{
+
+void TrailRenderer::Initialize(const RenderEnvironment& env)
+{
+    const uint32_t kMaxTotalVertices = kMaxTrailCount * kMaxTrailVertices * 2;
+    trailBatch_.verticesCPU.reserve(kMaxTotalVertices);
+
+    // 最大頂点数分確保
+    trailBatch_.mesh.InitializeVertexTrail(env.device->GetDevice(), kMaxTotalVertices);
+
+    trailBatch_.materialResource = BufferManager::CreateMappedConstantBufferArray(
+        env.device->GetDevice(),
+        kMaxTrailCount,
+        &trailBatch_.mappedMaterial
+    );
+
+    trailBatch_.wvpResource = BufferManager::CreateMappedConstantBuffer(
+        env.device->GetDevice(),
+        &trailBatch_.mappedWvp
+    );
+}
+
+void TrailRenderer::BeginFrame()
+{
+    prevTrailCount_ = indexTrail_;
+    indexTrail_ = 0;
+
+    trailBatch_.verticesCPU.clear();
+    trailBatches_.clear();
+}
+
+void TrailRenderer::Submit(const std::vector<TrailPoint>& points, const TrailModule& config, const Vector3& cameraPosition, float instanceSeed)
+{
+    if (indexTrail_ >= kMaxTrailCount || points.size() < 2) return;
+
+    const uint32_t textureHandle = TextureManager::GetInstance().Get(config.textureName);
+
+    TrailMaterialData matData{};
+    matData.jitterStrength = config.jitterStrength;
+    matData.jitterFrequency = config.jitterFrequency;
+    matData.jitterSpeed = config.jitterSpeed;
+    matData.jitterMode = static_cast<int>(config.jitterMode);
+    matData.jitterPhase = config.jitterPhase;
+    matData.emissiveIntensity = config.emissiveIntensity;
+    matData.instanceSeed = instanceSeed;
+
+    // 同一ステートであれば既存バッチを拡張
+    bool isNewBatch = trailBatches_.empty();
+    if (!isNewBatch)
+    {
+        const auto& last = trailBatches_.back();
+        isNewBatch = (last.textureHandle != textureHandle) ||
+            (std::memcmp(&last.materialData, &matData, sizeof(TrailMaterialData)) != 0);
+    }
+
+    if (isNewBatch)
+    {
+        trailBatches_.push_back({ static_cast<uint32_t>(trailBatch_.verticesCPU.size()), 0, textureHandle, matData });
+    }
+
+    const float invLastIndex = 1.0f / static_cast<float>(points.size() - 1);
+
+    Vector3 prevLeft{}, prevRight{};
+    float prevU = 0.0f;
+    Vector4 prevColor{};
+
+    for (size_t i = 0; i < points.size(); ++i)
+    {
+        const Vector3& pos = points[i].position;
+
+        Vector3 forward = (i < points.size() - 1)
+            ? (points[i + 1].position - pos).Normalize()
+            : (pos - points[i - 1].position).Normalize();
+
+        Vector3 right;
+        if (config.alignment == TrailAlignment::View)
+        {
+            Vector3 toCamera = (cameraPosition - pos).Normalize();
+            right = Math::CrossProduct(toCamera, forward).Normalize();
+        }
+        else
+        {
+            Vector3 up = points[i].rotation.RotateVector({ 0.0f, 1.0f, 0.0f });
+            right = Math::CrossProduct(up, forward).Normalize();
+        }
+
+        if (right.LengthSq() < 0.001f)
+        {
+            right = Math::CrossProduct({ 0.0f, 1.0f, 0.0f }, forward).Normalize();
+        }
+
+        const float t = static_cast<float>(i) * invLastIndex;
+        const float halfWidth = config.width * std::lerp(config.tailWidthScale, config.headWidthScale, t) * 0.5f;
+
+        const Vector3 currentLeft = pos - right * halfWidth;
+        const Vector3 currentRight = pos + right * halfWidth;
+        const Vector4 currentColor(
+            std::lerp(config.endColor.x, config.startColor.x, t),
+            std::lerp(config.endColor.y, config.startColor.y, t),
+            std::lerp(config.endColor.z, config.startColor.z, t),
+            std::lerp(config.endColor.w, config.startColor.w, t)
+        );
+
+        if (i > 0)
+        {
+            trailBatch_.verticesCPU.push_back({ { prevLeft.x,    prevLeft.y,    prevLeft.z,    1.0f }, { prevU, 0.0f }, prevColor });
+            trailBatch_.verticesCPU.push_back({ { currentLeft.x, currentLeft.y, currentLeft.z, 1.0f }, { t,     0.0f }, currentColor });
+            trailBatch_.verticesCPU.push_back({ { prevRight.x,   prevRight.y,   prevRight.z,   1.0f }, { prevU, 1.0f }, prevColor });
+
+            trailBatch_.verticesCPU.push_back({ { prevRight.x,   prevRight.y,   prevRight.z,   1.0f }, { prevU, 1.0f }, prevColor });
+            trailBatch_.verticesCPU.push_back({ { currentLeft.x, currentLeft.y, currentLeft.z, 1.0f }, { t,     0.0f }, currentColor });
+            trailBatch_.verticesCPU.push_back({ { currentRight.x,currentRight.y,currentRight.z,1.0f }, { t,     1.0f }, currentColor });
+
+            trailBatches_.back().vertexCount += 6;
+        }
+
+        prevLeft = currentLeft;
+        prevRight = currentRight;
+        prevU = t;
+        prevColor = currentColor;
+    }
+
+    indexTrail_++;
+}
+
+void TrailRenderer::Draw(const RenderEnvironment& env, const Matrix4x4& viewProjection)
+{
+    if (trailBatches_.empty() || trailBatch_.verticesCPU.empty()) return;
+
+    auto* cmdList = env.commandManager->GetCommandList();
+
+    // トレイルパス全体のスコープ
+    PIXScopedEvent(cmdList, FS::PIXColors::Geometry, "Trail Pass");
+
+    TrailVertexData* mappedVertices = nullptr;
+    trailBatch_.mesh.GetVertexResource()->Map(0, nullptr, reinterpret_cast<void**>(&mappedVertices));
+    memcpy(mappedVertices, trailBatch_.verticesCPU.data(), sizeof(TrailVertexData) * trailBatch_.verticesCPU.size());
+    trailBatch_.mesh.GetVertexResource()->Unmap(0, nullptr);
+
+    D3D12_VERTEX_BUFFER_VIEW vbView = trailBatch_.mesh.GetVertexBufferView();
+    vbView.SizeInBytes = static_cast<uint32_t>(sizeof(TrailVertexData) * trailBatch_.verticesCPU.size());
+    cmdList->IASetVertexBuffers(0, 1, &vbView);
+
+    cmdList->SetPipelineState(env.psoManager->GetPSO("Trail"));
+    cmdList->SetGraphicsRootSignature(env.rootSignatureManager->GetRootSignature("Trail"));
+    cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+    trailBatch_.mappedWvp->WVP = viewProjection;
+    trailBatch_.mappedWvp->World = Matrix4x4::MakeIdentity();
+    cmdList->SetGraphicsRootConstantBufferView(0, trailBatch_.wvpResource->GetGPUVirtualAddress());
+    cmdList->SetGraphicsRootConstantBufferView(2, env.globalConstants->GetResource()->GetGPUVirtualAddress());
+
+    const uint32_t alignedSize = (sizeof(TrailMaterialData) + 255) & ~255;
+    D3D12_GPU_VIRTUAL_ADDRESS materialBaseAddr = trailBatch_.materialResource->GetGPUVirtualAddress();
+    uint8_t* mappedBasePtr = reinterpret_cast<uint8_t*>(trailBatch_.mappedMaterial);
+
+    for (size_t i = 0; i < trailBatches_.size(); ++i)
+    {
+        const auto& batch = trailBatches_[i];
+        if (batch.vertexCount == 0) continue;
+
+        // バッチごとの個別スコープ（インデックスと頂点数を可視化）
+        PIXScopedEvent(cmdList, FS::PIXColors::Geometry, "Trail Batch %zu (Vertices: %u)", i, batch.vertexCount);
+
+        const uint32_t offset = static_cast<uint32_t>(i) * alignedSize;
+
+        memcpy(mappedBasePtr + offset, &batch.materialData, sizeof(TrailMaterialData));
+        cmdList->SetGraphicsRootConstantBufferView(1, materialBaseAddr + offset);
+
+        cmdList->SetGraphicsRootDescriptorTable(3, env.srvManager->GetSRVHandleGPU(batch.textureHandle));
+
+        cmdList->DrawInstanced(batch.vertexCount, 1, batch.startVertexIndex, 0);
+    }
+}
+
+}

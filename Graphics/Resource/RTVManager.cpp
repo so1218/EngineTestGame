@@ -1,0 +1,142 @@
+#include "pch.h"
+#include "RTVManager.h"
+#include "DescriptorHeapManager.h"
+#include "Engine.h"
+#include "SwapChain.h"
+#include "SRVManager.h"
+
+namespace FS
+{
+
+void RTVManager::Initialize(ID3D12Device* device, IDXGISwapChain4* swapChain, DescriptorHeapManager* descriptorManager)
+{
+    rtvHandles.resize(SwapChain::kBufferCount);
+    swapChainResources.resize(SwapChain::kBufferCount);
+
+    // RTVヒープを作成（Shader内で使用しないのでShaderVisibleはfalse）
+    rtvDescriptorHeap_ = descriptorManager->CreateDescriptorHeap(device, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, SwapChain::kBufferCount, false);
+
+    // ヒープ先頭のCPUハンドルを取得
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHeapStartCPUHandle = rtvDescriptorHeap_->GetCPUDescriptorHandleForHeapStart();
+
+    // RTVディスクリプタのサイズを取得
+    descriptorSizeRTV_ = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+
+    // RTVの基本設定
+    rtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+
+    // SwapChainのバックバッファから各RTVを作成
+    for (uint32_t i = 0; i < SwapChain::kBufferCount; ++i)
+    {
+        HRESULT hr = swapChain->GetBuffer(i, IID_PPV_ARGS(&swapChainResources[i]));
+        assert(SUCCEEDED(hr));
+
+        // CPUハンドルの位置を計算
+        rtvHandles[i].ptr = rtvHeapStartCPUHandle.ptr + (SIZE_T)i * descriptorSizeRTV_;
+
+        // RTVを作成
+        device->CreateRenderTargetView(swapChainResources[i].Get(), &rtvDesc, rtvHandles[i]);
+    }
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE RTVManager::GetCurrentBackBufferRTVCPUHandle(SwapChain* swapChainManager)
+{
+    uint32_t backBufferIndex = swapChainManager->GetSwapChain()->GetCurrentBackBufferIndex();
+    assert(backBufferIndex < rtvHandles.size());
+    return rtvHandles[backBufferIndex];
+}
+
+void OffscreenRTVManager::Initialize(ID3D12Device* device, SRVManager* srvManager, DescriptorHeapManager* descriptorManager)
+{
+    device_ = device;
+    srvManager_ = srvManager;
+
+    // RTVヒープを作成
+    rtvDescriptorHeap_ = descriptorManager->CreateDescriptorHeap(device_, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, kMaxRTVCount, false);
+    rtvDescriptorSize_ = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    rtvHeapStart_ = rtvDescriptorHeap_->GetCPUDescriptorHandleForHeapStart();
+    offscreenRTVHandles_.resize(kMaxRTVCount);
+
+    createdRTVCount_ = 0;
+    clearColor_ = Vector4(0.03f, 0.03f, 0.03f, 1.0f);
+}
+
+std::tuple<Microsoft::WRL::ComPtr<ID3D12Resource>, D3D12_CPU_DESCRIPTOR_HANDLE, uint32_t, uint32_t>
+OffscreenRTVManager::CreateOffscreenRenderTarget(uint32_t width, uint32_t height, Vector4 clearColor, DXGI_FORMAT format, bool enableUAV)
+{
+    uint32_t rtvIndex = createdRTVCount_;
+    assert(rtvIndex < kMaxRTVCount);
+    createdRTVCount_++;
+
+    // テクスチャのリソース作成
+    D3D12_RESOURCE_DESC texDesc = {};
+    texDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    texDesc.Width = width;
+    texDesc.Height = height;
+    texDesc.DepthOrArraySize = 1;
+    texDesc.MipLevels = 1;
+    texDesc.Format = format;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+
+    // フラグがtrueの場合のみUAV許可
+    if (enableUAV)
+    {
+        texDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    }
+
+    D3D12_CLEAR_VALUE clearValue = {};
+    clearValue.Format = format;
+    clearValue.Color[0] = clearColor.x;
+    clearValue.Color[1] = clearColor.y;
+    clearValue.Color[2] = clearColor.z;
+    clearValue.Color[3] = clearColor.w;
+
+    CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT);
+    Microsoft::WRL::ComPtr<ID3D12Resource> texture;
+    HRESULT hr = device_->CreateCommittedResource(
+        &heapProps,
+        D3D12_HEAP_FLAG_NONE,
+        &texDesc,
+        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+        &clearValue,
+        IID_PPV_ARGS(&texture)
+    );
+    assert(SUCCEEDED(hr));
+
+    offscreenTextures_.push_back(texture);
+
+    // RTV作成
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = rtvHeapStart_;
+    rtvHandle.ptr += rtvIndex * rtvDescriptorSize_;
+    device_->CreateRenderTargetView(texture.Get(), nullptr, rtvHandle);
+    offscreenRTVHandles_[rtvIndex] = rtvHandle;
+
+    D3D12_SHADER_RESOURCE_VIEW_DESC sceneSrvDesc = {};
+    sceneSrvDesc.Format = format;
+    sceneSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    sceneSrvDesc.Texture2D.MipLevels = 1;
+    sceneSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+
+    // SRVを作成し、インデックスを取得
+    uint32_t srvIndex = srvManager_->CreateSRV(texture.Get(), sceneSrvDesc);
+
+    // メンバ変数の配列に保存しておく
+    offscreenSrvIndices_.push_back(srvIndex);
+
+    // UAVの作成分岐
+    uint32_t uavIndex = 0; // 使わない場合は0
+    if (enableUAV)
+    {
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+        uavDesc.Format = format;
+        uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        uavIndex = srvManager_->CreateUAV(texture.Get(), uavDesc);
+        offscreenUavIndices_.push_back(uavIndex);
+    }
+
+    return { texture, rtvHandle, srvIndex, uavIndex };
+}
+
+}

@@ -1,0 +1,46 @@
+#pragma once
+#include "TextureLoader.h"
+
+namespace FS
+{
+
+class Engine;
+
+struct TextureHandleData
+{
+    std::string name;       // 検索キー
+    std::string fullPath;   // フルパス
+    TextureType type;       // タイプ
+    uint32_t handle;        // SRVインデックス
+};
+
+class TextureManager
+{
+public:
+    static TextureManager& GetInstance()
+    {
+        static TextureManager instance;
+        return instance;
+    }
+
+    // Engine/Assets/Textures と Assets/Textures のテクスチャをすべて読む
+    void LoadAllTextures(Engine* engine);
+    uint32_t Get(const std::string& name, std::source_location location = std::source_location::current());
+    const TextureHandleData* GetMetaData(const std::string& name);
+    const std::vector<TextureHandleData>& GetAllTextures() const { return textures_; }
+
+    // 指定タイプのテクスチャ名前一覧を取得する関数
+    std::vector<std::string> GetTextureNamesByType(TextureType type) const;
+
+private:
+    TextureManager() = default;
+    ~TextureManager() = default;
+
+    TextureType DetectTypeFromPath(const std::filesystem::path& path);
+
+    std::vector<TextureHandleData> textures_;
+    std::unordered_map<std::string, size_t> nameToIndex_;
+    uint32_t errorHandle_ = 0;
+};
+
+}

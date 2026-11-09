@@ -1,0 +1,4 @@
+{
+  "RootSignature": "WorldInteractionCS",
+  "ComputeShader": "Environment/WorldInteraction.CS.hlsl"
+}

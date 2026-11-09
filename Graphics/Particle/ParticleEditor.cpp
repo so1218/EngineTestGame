@@ -1,0 +1,531 @@
+#include "pch.h"
+#include "ParticleEditor.h"
+#include "imGuiManager.h"
+#include "TextureManager.h"
+#include "ParticleEmitter.h"
+#include "ParticleConfigManager.h" 
+#include "ParticleSystem.h"
+#include "Engine.h" 
+#include "SRVManager.h"
+
+namespace FS
+{
+
+ParticleEditor::ParticleEditor(ParticleSystem* particleSystem, Engine* engine)
+    : particleSystem_(particleSystem), engine_(engine)
+{
+}
+
+void ParticleEditor::ShowEditor()
+{
+#ifdef ENABLE_IMGUI
+    if (ImGui::Begin("パーティクルエディター"))
+    {
+        // プリセット名リスト生成
+        std::vector<const char*> presetNames;
+        std::vector<std::string> presetNameStrings;
+        for (const auto& [name, def] : particleSystem_->definitions_)
+        {
+            presetNameStrings.push_back(name);
+        }
+        for (const auto& name : presetNameStrings)
+        {
+            presetNames.push_back(name.c_str());
+        }
+
+        // プリセットがない場合
+        if (presetNames.empty())
+        {
+            ImGui::Text("利用可能なプリセットがない");
+        }
+        else
+        {
+            // 選択インデックス調整
+            if (selectedPresetIdx_ >= presetNames.size())
+            {
+                selectedPresetIdx_ = 0;
+            }
+
+            // プリセット選択
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("プリセット");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::Combo("##Preset", &selectedPresetIdx_, presetNames.data(), (int)presetNames.size());
+
+            const std::string& selectedPresetName = presetNameStrings[selectedPresetIdx_];
+
+            // 何度も押すので、スクロールしなくても見えるプリセットのすぐ下に置く
+            if (ImGui::Button("セーブ"))
+            {
+                particleSystem_->configManager_->SaveParticleDefinitionToJson(selectedPresetName);
+                saveMessageTimer_ = 3.0f;
+            }
+            if (saveMessageTimer_ > 0.0f)
+            {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "%s.json を保存", selectedPresetName.c_str());
+                saveMessageTimer_ -= ImGui::GetIO().DeltaTime;
+            }
+            ImGui::Separator();
+
+            auto& definition = particleSystem_->definitions_[selectedPresetName];
+            auto& config = definition.particleConfig;
+            auto& emitterConfig = definition.emitterConfig;
+
+            // パレット表示用の共通関数
+            auto ShowTexturePalette = [&](const char* label, std::string& currentTexName, TextureType filterType)
+                {
+                    if (ImGui::TreeNode(label))
+                    {
+                        // 全テクスチャリストを取得
+                        const auto& allTextures = TextureManager::GetInstance().GetAllTextures();
+
+                        float windowVisibleX2 = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+                        ImGuiStyle& style = ImGui::GetStyle();
+
+                        // フィルタリングして表示
+                        for (size_t i = 0; i < allTextures.size(); i++)
+                        {
+                            const auto& data = allTextures[i];
+
+                            // 指定されたタイプ以外はスキップ
+                            if (data.type != filterType) {
+                                continue;
+                            }
+
+                            // GPUハンドル取得
+                            auto gpuHandle = engine_->GetSRVManager()->GetSRVHandleGPU(data.handle);
+                            ImTextureID imTexID = (ImTextureID)gpuHandle.ptr;
+
+                            ImGui::PushID((int)i);
+
+                            // 選択状態判定 
+                            bool isSelected = (currentTexName == data.name);
+
+                            if (isSelected) {
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 0.0f, 1.0f));
+                            }
+                            else {
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
+                            }
+
+                            // 画像ボタン
+                            if (ImGui::ImageButton("TexBtn", imTexID, ImVec2(32, 32),
+                                ImVec2(0, 0), ImVec2(1, 1), ImVec4(0, 0, 0, 0), ImVec4(1, 1, 1, 1)))
+                            {
+                                currentTexName = data.name;
+
+                                // 変更された瞬間にハンドルを更新
+                                config.RefreshResources();
+                            }
+
+                            ImGui::PopStyleColor();
+
+                            // ツールチップ
+                            if (ImGui::IsItemHovered())
+                            {
+                                ImGui::BeginTooltip();
+                                ImGui::Text("%s", data.name.c_str());
+                                ImGui::Image(imTexID, ImVec2(128, 128));
+                                ImGui::EndTooltip();
+                            }
+
+                            ImGui::PopID();
+
+                            // 横並び計算
+                            float lastButtonX2 = ImGui::GetItemRectMax().x;
+                            float nextButtonX2 = lastButtonX2 + style.ItemSpacing.x + 32.0f;
+
+                            if (nextButtonX2 < windowVisibleX2)
+                            {
+                                ImGui::SameLine();
+                            }
+                        }
+                        ImGui::TreePop();
+                    }
+                };
+
+            if (ImGui::CollapsingHeader("基本設定"))
+            {
+                bool intensityChanged = ImGui::DragFloat("発光強度", &config.intensity, 0.1f, 0.0f);
+
+                ImGui::Separator();
+
+                // コンボボックス表示用の配列
+                const char* blendModeItems[] =
+                {
+                    "None",
+                    "Normal",
+                    "Add",
+                };
+
+                int currentBlendMode = static_cast<int>(config.blendMode);
+
+                if (ImGui::Combo("ブレンドモード", &currentBlendMode, blendModeItems, IM_ARRAYSIZE(blendModeItems)))
+                {
+                    config.blendMode = static_cast<BlendMode>(currentBlendMode);
+                }
+
+            }
+
+            // エミッター設定
+            if (ImGui::CollapsingHeader("エミッター設定"))
+            {
+                bool valueChanged = false;
+
+                // エミッター基本設定
+                valueChanged |= ImGui::DragFloat3("位置", &emitterConfig.position.x, 0.1f);
+                ImGui::Separator();
+                valueChanged |= ImGui::DragFloat3("追従オフセット", &emitterConfig.followOffset.x, 0.1f);
+
+                ImGui::Separator();
+                bool intervalEdited = ImGui::DragFloat("発生間隔 (秒)", &emitterConfig.spawnInterval, 0.01f);
+                valueChanged |= intervalEdited;
+                if (ImGui::IsItemDeactivatedAfterEdit())
+                {
+                    if (emitterConfig.spawnInterval <= 0.01f)
+                    {
+                        emitterConfig.spawnInterval = 0.01f;
+                    }
+                    valueChanged = true;
+                }
+
+                if (ImGui::IsItemActive() && intervalEdited)
+                {
+                    if (emitterConfig.spawnInterval <= 0.0f)
+                    {
+                        valueChanged = false;
+                    }
+                }
+                valueChanged |= ImGui::DragFloat("生存時間", &emitterConfig.lifetime, 0.01f, 0.0f, 10.0f);
+                ImGui::Separator();
+                valueChanged |= ImGui::DragInt("発生数", &emitterConfig.amount, 1, 0);
+                ImGui::Separator();
+                valueChanged |= ImGui::DragFloat("再生時間", &emitterConfig.duration, 0.001f);
+
+                ImGui::Separator();
+                valueChanged |= ImGui::Checkbox("ループ", &emitterConfig.looping);
+                ImGui::Separator();
+                valueChanged |= ImGui::Checkbox("生成時に再生", &emitterConfig.playOnAwake);
+
+                // 設定変更をライブ反映
+                if (valueChanged)
+                {
+                    ApplyEmitterConfigToLiveEmitters(selectedPresetName);
+                }
+            }
+
+            // パーティクル設定
+            if (ImGui::CollapsingHeader("パーティクル設定"))
+            {
+                // 速度モジュール
+                if (ImGui::TreeNode("初速モジュール"))
+                {
+                    auto& vel = config.velocity;
+
+                    ImGui::Checkbox("有効##Velocity", &vel.enabled);
+                    ImGui::DragFloat("速度", &vel.speed, 0.01f, 0.0f, 1000.0f);
+                    ImGui::Checkbox("ランダム方向", &vel.randomDirection);
+
+                    if (vel.randomDirection)
+                        ImGui::SliderFloat("拡散角度", &vel.angleRange, 0.0f, 360.0f, "%.0f 度");
+
+                    ImGui::DragFloat3("方向", &vel.direction.x, 0.01f);
+
+                    ImGui::TreePop();
+                }
+
+                ImGui::Separator();
+
+                // 物理モジュール
+                if (ImGui::TreeNode("物理モジュール"))
+                {
+                    auto& phys = config.physics;
+                    ImGui::Checkbox("有効##Physics", &phys.enabled);
+                    ImGui::DragFloat3("重力", &phys.gravity.x, 0.1f);
+                    ImGui::DragFloat("空気抵抗", &phys.drag, 0.001f, 0.0f, 1.0f);
+
+                    ImGui::Separator();
+                    ImGui::Checkbox("風の影響を受ける", &phys.affectedByWind);
+                    if (phys.affectedByWind)
+                    {
+                        ImGui::DragFloat("風の影響度", &phys.windInfluence, 0.01f, 0.0f, 10.0f);
+                    }
+
+                    ImGui::TreePop();
+                }
+
+                ImGui::Separator();
+
+                // 回転モジュール
+                if (ImGui::TreeNode("回転モジュール"))
+                {
+                    auto& rot = config.rotation;
+
+                    ImGui::Checkbox("有効##Rotation", &rot.enabled);
+                    ImGui::Separator();
+                    ImGui::Checkbox("ビルボード", &rot.isBillboard);
+                    ImGui::Separator();
+
+                    ImGui::Text("初期角度");
+                    ImGui::DragFloat3("最小##StartRotMin", &rot.minStartRotation.x, 1.0f);
+                    ImGui::DragFloat3("最大##StartRotMax", &rot.maxStartRotation.x, 1.0f);
+
+                    ImGui::Separator();
+                    ImGui::Text("回転速度");
+                    if (rot.isBillboard)
+                    {
+                        ImGui::DragFloat("最小速度 (2D)", &rot.minAngularVelocity2D, 1.0f);
+                        ImGui::DragFloat("最大速度 (2D)", &rot.maxAngularVelocity2D, 1.0f);
+                    }
+                    else
+                    {
+                        ImGui::DragFloat3("最小速度 (3D)", &rot.minAngularVelocity3D.x, 1.0f);
+                        ImGui::DragFloat3("最大速度 (3D)", &rot.maxAngularVelocity3D.x, 1.0f);
+                    }
+
+                    ImGui::TreePop();
+                }
+
+                ImGui::Separator();
+
+                // 形状モジュール
+                if (ImGui::TreeNode("エミッター形状モジュール"))
+                {
+                    auto& shape = config.shape;
+
+                    const char* shapeTypes[] = { "点", "ボックス", "球" };
+                    int currentShapeType = (int)shape.type;
+
+                    if (ImGui::Combo("形状タイプ", &currentShapeType, shapeTypes, IM_ARRAYSIZE(shapeTypes)))
+                        shape.type = (ShapeModule::Type)currentShapeType;
+
+                    ImGui::Separator();
+
+                    switch (shape.type)
+                    {
+                    case ShapeModule::Type::Box:
+                        ImGui::DragFloat3("ボックスサイズ", &shape.boxSize.x, 0.1f);
+                        break;
+                    case ShapeModule::Type::Sphere:
+                        ImGui::DragFloat3("半径", &shape.radius.x, 0.1f);
+                        ImGui::Checkbox("縁から放出", &shape.emitFromEdge);
+                        break;
+                    case ShapeModule::Type::Point:
+                        break;
+                    }
+
+                    ImGui::TreePop();
+                }
+
+                ImGui::Separator();
+
+                // テクスチャシート
+                ShowTexturePalette("テクスチャモジュール", config.textureSheet.textureName, TextureType::Particle);
+
+                ImGui::Separator();
+
+                // 色変化モジュール
+                if (ImGui::TreeNode("生存期間中の色"))
+                {
+                    auto& color = config.colorOverLifetime;
+
+                    ImGui::Checkbox("有効##Color", &color.enabled);
+
+                    const char* modes[] = { "単一", "ランダム2種" };
+                    int mode = (int)color.mode;
+                    if (ImGui::Combo("モード", &mode, modes, IM_ARRAYSIZE(modes)))
+                        color.mode = (ColorOverLifetimeModule::Mode)mode;
+
+                    // グラデーション1
+                    Vector4 start1 = Math::Uint32ToColorVector(color.startColor);
+                    if (ImGui::ColorEdit4("開始色 1", &start1.x))
+                        color.startColor = Math::ColorVectorToUint32(start1);
+
+                    Vector4 end1 = Math::Uint32ToColorVector(color.endColor);
+                    if (ImGui::ColorEdit4("終了色 1", &end1.x))
+                        color.endColor = Math::ColorVectorToUint32(end1);
+
+                    // グラデーション2
+                    if (color.mode == ColorOverLifetimeModule::Mode::RandomBetweenTwo)
+                    {
+                        Vector4 start2 = Math::Uint32ToColorVector(color.startColor2);
+                        if (ImGui::ColorEdit4("開始色 2", &start2.x))
+                            color.startColor2 = Math::ColorVectorToUint32(start2);
+
+                        Vector4 end2 = Math::Uint32ToColorVector(color.endColor2);
+                        if (ImGui::ColorEdit4("終了色 2", &end2.x))
+                            color.endColor2 = Math::ColorVectorToUint32(end2);
+                    }
+
+                    ImGui::Separator();
+
+                    ImGui::TreePop();
+                }
+
+                ImGui::Separator();
+
+                // サイズ変化モジュール
+                if (ImGui::TreeNode("生存期間中のサイズ"))
+                {
+                    auto& size = config.sizeOverLifetime;
+
+                    ImGui::Checkbox("有効##Size", &size.enabled);
+                    ImGui::DragFloat3("開始サイズ", &size.startScale.x, 0.01f);
+                    ImGui::DragFloat3("終了サイズ", &size.endScale.x, 0.01f);
+
+                    ImGui::Separator();
+                    ImGui::Checkbox("振動", &size.oscillate);
+                    if (size.oscillate)
+                        ImGui::DragFloat("周波数", &size.frequency, 0.1f, 0.0f, 100.0f);
+
+                    ImGui::TreePop();
+                }
+
+                ImGui::Separator();
+                if (ImGui::TreeNode("引力モジュール"))
+                {
+                    auto& attraction = config.attraction;
+
+                    ImGui::Checkbox("有効##Attraction", &attraction.enabled);
+
+                    if (attraction.enabled)
+                    {
+                        ImGui::DragFloat("引力の強さ", &attraction.strength, 0.1f, -500.0f, 500.0f);
+
+                        ImGui::Separator();
+                        ImGui::Text("静的ターゲット (ターゲット未設定時)");
+                        ImGui::DragFloat3("座標##AttractionTarget", &attraction.target.x, 0.1f);
+
+                        ImGui::Separator();
+                        ImGui::Text("動的ターゲット (SetTargetToFollow使用時)");
+                        ImGui::DragFloat3("オフセット##AttractionOffset", &attraction.offset.x, 0.1f);
+                    }
+                    ImGui::TreePop();
+                }
+                ImGui::Separator();
+
+                if (ImGui::TreeNode("トレイルモジュール"))
+                {
+                    auto& trail = config.trail;
+
+                    ImGui::Checkbox("有効##Trail", &trail.enabled);
+
+                    if (trail.enabled)
+                    {
+                        ImGui::DragFloat("太さ", &trail.width, 0.1f, 0.1f, 10.0f);
+                        ImGui::DragFloat("発光強度", &trail.emissiveIntensity, 0.1f, 0.0f, 100.0f);
+                        ImGui::DragFloat("寿命", &trail.lifetime, 0.1f, 0.1f, 5.0f);
+                        ImGui::DragFloat("最小頂点距離", &trail.minVertexDistance, 0.01f, 0.01f, 10.0f);
+
+                        ImGui::Separator();
+
+                        // メインテクスチャ選択
+                        ShowTexturePalette("トレイルテクスチャ選択", trail.textureName, TextureType::Particle);
+
+                        ImGui::Separator();
+
+                        const char* jitterModes[] = { "滑らか", "ランダム" };
+                        int currentJitter = static_cast<int>(trail.jitterMode);
+                        if (ImGui::Combo("揺れタイプ", &currentJitter, jitterModes, IM_ARRAYSIZE(jitterModes)))
+                        {
+                            trail.jitterMode = static_cast<JitterMode>(currentJitter);
+                        }
+
+                        ImGui::Text("ジッター (形状変形)");
+                        ImGui::DragFloat("強さ", &trail.jitterStrength, 0.1f, 0.0f, 50.0f);
+                        ImGui::DragFloat("周波数", &trail.jitterFrequency, 0.1f, 0.1f, 100.0f);
+                        ImGui::DragFloat("変動速度", &trail.jitterSpeed, 0.1f, 0.0f, 100.0f);
+                        ImGui::DragFloat("位相 (位置ずらし)", &trail.jitterPhase, 0.01f, -10.0f, 10.0f);
+
+                        ImGui::Separator();
+
+                        ImGui::Text("太さの変化");
+                        ImGui::DragFloat("先端スケール", &trail.headWidthScale, 0.01f, 0.0f, 5.0f);
+                        ImGui::DragFloat("末尾スケール", &trail.tailWidthScale, 0.01f, 0.0f, 5.0f);
+
+                        ImGui::Separator();
+
+                        const char* alignModes[] = { "カメラ向き", "回転追従" };
+                        int currentAlign = static_cast<int>(trail.alignment);
+                        if (ImGui::Combo("向きの制御", &currentAlign, alignModes, IM_ARRAYSIZE(alignModes)))
+                        {
+                            trail.alignment = static_cast<TrailAlignment>(currentAlign);
+                        }
+
+                        ImGui::Separator();
+
+                        ImGui::Text("カラー推移");
+                        ImGui::ColorEdit4("開始色 (根元)", &trail.startColor.x);
+                        ImGui::ColorEdit4("終了色 (先端)", &trail.endColor.x);
+                    }
+
+                    ImGui::TreePop();
+                }
+
+                ImGui::Separator();
+
+                if (ImGui::TreeNode("ノイズモジュール"))
+                {
+                    auto& noise = config.noise;
+
+                    ImGui::Checkbox("有効##Noise", &noise.enabled);
+                    if (noise.enabled)
+                    {
+                        const char* typeNames[] = { "Simplex", "Curl " };
+                        int currentType = static_cast<int>(noise.type);
+                        if (ImGui::Combo("タイプ", &currentType, typeNames, IM_ARRAYSIZE(typeNames)))
+                        {
+                            noise.type = static_cast<NoiseModule::NoiseType>(currentType);
+                        }
+
+                        ImGui::DragFloat("強度", &noise.strength, 0.1f, 0.0f, 100.0f);
+
+                        ImGui::DragFloat("周波数", &noise.frequency, 0.002f, 0.001f, 0.5f, "%.3f");
+                        ImGui::DragFloat("スクロール速度", &noise.scrollSpeed, 0.01f, 0.0f, 10.0f);
+
+                        if (noise.type == NoiseModule::NoiseType::Simplex)
+                        {
+                            ImGui::Checkbox("XYZ軸で分離", &noise.separateAxes);
+                        }
+                    }
+
+                    ImGui::TreePop();
+                }
+            }
+        }
+    }
+
+    ImGui::End();
+#endif
+}
+
+void ParticleEditor::ApplyEmitterConfigToLiveEmitters(const std::string& presetName)
+{
+    // 指定プリセットのエミッター設定を取得
+    const auto& emitterConfig = particleSystem_->definitions_.at(presetName).emitterConfig;
+
+    // すべてのライブエミッターをチェック
+    for (auto& emitter : particleSystem_->emitters_)
+    {
+        // プリセット名が一致するエミッターに設定を適用
+        if (emitter->presetName_ == presetName)
+        {
+            emitter->position_ = emitterConfig.position;
+            emitter->spawnInterval_ = emitterConfig.spawnInterval;
+            emitter->lifetime_ = emitterConfig.lifetime;
+            emitter->amount_ = emitterConfig.amount;
+            emitter->duration_ = emitterConfig.duration;
+            emitter->followOffset_ = emitterConfig.followOffset;
+
+            // ループ設定を更新し、停止中だったエミッターを再生
+            bool wasStopped = !emitter->isPlaying_;
+            emitter->looping_ = emitterConfig.looping;
+            if (wasStopped && emitter->looping_)
+                emitter->Play();
+        }
+    }
+}
+
+}
